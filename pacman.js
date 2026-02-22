@@ -19,13 +19,14 @@ function loadImage(src) {
 // P = player
 // G = ghost (A*)
 // B = ghost (BFS)
+// C = ghost (ACO)
 const tileMap = [
   "XXXXXXXXXXXXXXXXXXX",
   "X        X        X",
   "X XX XXX X XXX XX X",
-  "X                 X",
+  "X        C        X",
   "X XX X XXXXX X XX X",
-  "X    X   G    X    X",
+  "X    X       X    X",
   "XXXX XXXX XXXX XXXX",
   "OOOX X       X XOOO",
   "XXXX X XXrXX X XXXX",
@@ -105,6 +106,8 @@ window.onload = async function () {
   }
 
   loadMap(humanImg, ghostImg, wallImg);
+  // debug:
+  // console.log("ghosts.size =", ghosts.size, [...ghosts].map(g => g.ai));
 
   update(); // 20fps via setTimeout below
 };
@@ -134,6 +137,13 @@ function loadMap(humanImg, ghostImg, wallImg) {
         g.velocityX = 0;
         g.velocityY = 0;
         g.ai = "bfs";
+        ghosts.add(g);
+      } else if (ch === "C") {
+        const g = new Block(ghostImg, x, y, tileSize, tileSize);
+        g.velocityX = 0;
+        g.velocityY = 0;
+        g.ai = "aco";
+        g.pheromone = new Map(); // per-ghost pheromone memory
         ghosts.add(g);
       } else if (ch === "P") {
         pacman = new Block(humanImg, x, y, tileSize, tileSize);
@@ -229,6 +239,16 @@ function reconstructPath(cameFrom, goalKey) {
   return out;
 }
 
+function neighborsOf(tile) {
+  const nbs = [
+    { r: tile.r + 1, c: tile.c },
+    { r: tile.r - 1, c: tile.c },
+    { r: tile.r, c: tile.c + 1 },
+    { r: tile.r, c: tile.c - 1 }
+  ];
+  return nbs.filter(t => isWalkable(t.r, t.c));
+}
+
 // ======= A* (4-neighbor) =======
 function aStar(start, goal) {
   const startK = tileKey(start.r, start.c);
@@ -270,16 +290,7 @@ function aStar(start, goal) {
     const cur = parseKey(currentK);
     const curG = gScore.get(currentK) ?? Infinity;
 
-    const neighbors = [
-      { r: cur.r + 1, c: cur.c },
-      { r: cur.r - 1, c: cur.c },
-      { r: cur.r, c: cur.c + 1 },
-      { r: cur.r, c: cur.c - 1 }
-    ];
-
-    for (const nb of neighbors) {
-      if (!isWalkable(nb.r, nb.c)) continue;
-
+    for (const nb of neighborsOf(cur)) {
       const nbK = tileKey(nb.r, nb.c);
       const tentativeG = curG + 1;
 
@@ -319,16 +330,7 @@ function bfs(start, goal) {
       return reconstructPath(cameFrom, goalK);
     }
 
-    const neighbors = [
-      { r: cur.r + 1, c: cur.c },
-      { r: cur.r - 1, c: cur.c },
-      { r: cur.r, c: cur.c + 1 },
-      { r: cur.r, c: cur.c - 1 }
-    ];
-
-    for (const nb of neighbors) {
-      if (!isWalkable(nb.r, nb.c)) continue;
-
+    for (const nb of neighborsOf(cur)) {
       const nbK = tileKey(nb.r, nb.c);
       if (visited.has(nbK)) continue;
 
@@ -341,7 +343,142 @@ function bfs(start, goal) {
   return null;
 }
 
-// ======= ghost movement (A* or BFS) =======
+// ======= ACO (Ant Colony Optimization) pathfinding =======
+// This is an approximate/heuristic pathfinder. If it fails, we fall back to BFS.
+function acoPath(ghost, start, goal) {
+  const pher = ghost.pheromone ?? (ghost.pheromone = new Map());
+
+  const alpha = 1.0;   // pheromone importance
+  const beta = 3.0;    // heuristic importance
+  const rho = 0.25;    // evaporation rate
+  const Q = 40;        // deposit strength
+
+  const ants = 18;      // keep small for performance
+  const iterations = 7; // keep small for performance
+  const maxSteps = 90;  // cap so ants don't wander forever
+
+  const startK = tileKey(start.r, start.c);
+  const goalK = tileKey(goal.r, goal.c);
+  if (startK === goalK) return [start];
+
+  const edgeKey = (fromK, toK) => `${fromK}|${toK}`;
+  const getTau = (fromK, toK) => pher.get(edgeKey(fromK, toK)) ?? 1.0;
+
+  function evaporate() {
+    for (const [k, v] of pher.entries()) {
+      const nv = v * (1 - rho);
+      if (nv < 0.01) pher.delete(k);
+      else pher.set(k, nv);
+    }
+  }
+
+  function deposit(path) {
+    const cost = path.length - 1;
+    if (cost <= 0) return;
+    const add = Q / cost;
+
+    for (let i = 0; i < path.length - 1; i++) {
+      const a = path[i];
+      const b = path[i + 1];
+      const aK = tileKey(a.r, a.c);
+      const bK = tileKey(b.r, b.c);
+      const k = edgeKey(aK, bK);
+      pher.set(k, (pher.get(k) ?? 1.0) + add);
+    }
+  }
+
+  function pickNext(cur, goal, visited) {
+    const curK = tileKey(cur.r, cur.c);
+    const nbs = neighborsOf(cur);
+    if (!nbs.length) return null;
+
+    let weights = [];
+    let sum = 0;
+
+    for (const nb of nbs) {
+      const nbK = tileKey(nb.r, nb.c);
+      const tau = getTau(curK, nbK);
+      const eta = 1 / (manhattan(nb, goal) + 1);
+
+      let w = Math.pow(tau, alpha) * Math.pow(eta, beta);
+
+      // discourage loops but don't fully forbid them
+      if (visited.has(nbK)) w *= 0.05;
+
+      weights.push({ nb, w });
+      sum += w;
+    }
+
+    if (sum <= 0) {
+      return nbs[Math.floor(Math.random() * nbs.length)];
+    }
+
+    let r = Math.random() * sum;
+    for (const item of weights) {
+      r -= item.w;
+      if (r <= 0) return item.nb;
+    }
+    return weights[weights.length - 1].nb;
+  }
+
+  let bestOverall = null;
+  let bestOverallCost = Infinity;
+
+  for (let it = 0; it < iterations; it++) {
+    let bestIter = null;
+    let bestIterCost = Infinity;
+
+    for (let a = 0; a < ants; a++) {
+      let cur = start;
+      let path = [cur];
+      let visited = new Set([startK]);
+
+      let reached = false;
+
+      for (let step = 0; step < maxSteps; step++) {
+        const curK2 = tileKey(cur.r, cur.c);
+        if (curK2 === goalK) {
+          reached = true;
+          break;
+        }
+
+        const next = pickNext(cur, goal, visited);
+        if (!next) break;
+
+        cur = next;
+        const nk = tileKey(cur.r, cur.c);
+        path.push(cur);
+        visited.add(nk);
+
+        if (nk === goalK) {
+          reached = true;
+          break;
+        }
+      }
+
+      if (reached) {
+        const cost = path.length - 1;
+        if (cost < bestIterCost) {
+          bestIterCost = cost;
+          bestIter = path;
+        }
+      }
+    }
+
+    // update pheromones each iteration
+    evaporate();
+    if (bestIter) deposit(bestIter);
+
+    if (bestIter && bestIterCost < bestOverallCost) {
+      bestOverallCost = bestIterCost;
+      bestOverall = bestIter;
+    }
+  }
+
+  return bestOverall;
+}
+
+// ======= ghost movement (A* / BFS / ACO) =======
 function moveGhost(g) {
   // decide only on tile centers
   if (g.x % tileSize === 0 && g.y % tileSize === 0) {
@@ -351,7 +488,15 @@ function moveGhost(g) {
       const start = entityToTile(g);
       const goal = entityToTile(pacman);
 
-      const path = (g.ai === "bfs") ? bfs(start, goal) : aStar(start, goal);
+      let path = null;
+
+      if (g.ai === "bfs") {
+        path = bfs(start, goal);
+      } else if (g.ai === "aco") {
+        path = acoPath(g, start, goal) || bfs(start, goal); // fallback
+      } else {
+        path = aStar(start, goal);
+      }
 
       if (path && path.length >= 2) {
         const next = path[1];
@@ -482,8 +627,11 @@ class Block {
     this.velocityX = 0;
     this.velocityY = 0;
 
-    // "astar" or "bfs" (set during map load for ghosts)
+    // "astar" / "bfs" / "aco" set for ghosts
     this.ai = undefined;
+
+    // for ACO ghosts only
+    this.pheromone = undefined;
   }
 
   updateDirection() {
