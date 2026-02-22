@@ -1,10 +1,9 @@
-//board
-
+// ======= board / canvas =======
 let board;
 const tileSize = 32;
 let context;
 
-//images
+// ======= images =======
 function loadImage(src) {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -14,6 +13,7 @@ function loadImage(src) {
   });
 }
 
+// ======= map =======
 const tileMap = [
   "XXXXXXXXXXXXXXXXXXX",
   "X        X        X",
@@ -43,10 +43,12 @@ const columnCount = Math.max(...tileMap.map(r => r.length));
 const boardWidth = tileSize * columnCount;
 const boardHeight = tileSize * rowCount;
 
+// ======= entities =======
 const walls = new Set();
 const ghosts = new Set();
 let pacman;
 
+// ======= input =======
 const keys = {
   ArrowUp: { pressed: false },
   ArrowDown: { pressed: false },
@@ -54,6 +56,8 @@ const keys = {
   ArrowRight: { pressed: false }
 };
 let lastKey = "";
+
+// movement speed in pixels per frame
 const speed = 4;
 
 let gameOver = false;
@@ -75,11 +79,12 @@ addEventListener("keyup", (e) => {
   if (e.key in keys) keys[e.key].pressed = false;
 });
 
+// ======= init =======
 window.onload = async function () {
   board = document.getElementById("board");
   board.width = boardWidth;
   board.height = boardHeight;
-  context = board.getContext("2d"); //drawing on the board
+  context = board.getContext("2d");
   context.imageSmoothingEnabled = false;
 
   let humanImg, ghostImg, wallImg;
@@ -95,12 +100,11 @@ window.onload = async function () {
   }
 
   loadMap(humanImg, ghostImg, wallImg);
-  console.log(walls.size);
-  console.log(ghosts.size);
 
-  update(); //20fps
+  update(); // 20fps via setTimeout below
 };
 
+// ======= map loading =======
 function loadMap(humanImg, ghostImg, wallImg) {
   walls.clear();
   ghosts.clear();
@@ -109,7 +113,6 @@ function loadMap(humanImg, ghostImg, wallImg) {
   for (let r = 0; r < rowCount; r++) {
     for (let c = 0; c < columnCount; c++) {
       const ch = tileMap[r][c] ?? " ";
-
       const x = c * tileSize;
       const y = r * tileSize;
 
@@ -128,6 +131,7 @@ function loadMap(humanImg, ghostImg, wallImg) {
     }
   }
 
+  // optional: give ghosts an initial direction (A* will take over at first tile)
   ghosts.forEach(g => {
     const opts = getValidVelocities(g);
     if (opts.length) {
@@ -138,8 +142,10 @@ function loadMap(humanImg, ghostImg, wallImg) {
   });
 }
 
-function update(){ //20fps
+// ======= game loop =======
+function update() {
   if (!gameOver) {
+    // --- player movement ---
     if (pacman) {
       if (keys.ArrowUp.pressed && lastKey === "ArrowUp") {
         trySetVelocity(pacman, 0, -speed);
@@ -160,6 +166,7 @@ function update(){ //20fps
       pacman.y += pacman.velocityY;
     }
 
+    // --- ghosts movement ---
     ghosts.forEach(g => {
       moveGhost(g);
       if (pacman && rectsOverlap(pacman, g)) gameOver = true;
@@ -168,38 +175,173 @@ function update(){ //20fps
 
   draw();
 
-  if (!gameOver) setTimeout(update, 1000/20);
+  if (!gameOver) setTimeout(update, 1000 / 20);
 }
 
-function moveGhost(g) {
-  if (g.x % tileSize === 0 && g.y % tileSize === 0) {
-    const options = getValidVelocities(g);
+// ======= A* helpers (tile-based) =======
+function tileAt(r, c) {
+  const row = tileMap[r];
+  if (!row) return "X";
+  const ch = row[c];
+  return ch ?? "X";
+}
 
-    if (options.length) {
-      const revX = -g.velocityX;
-      const revY = -g.velocityY;
+function isWalkable(r, c) {
+  return tileAt(r, c) !== "X";
+}
 
-      let candidates = options;
-      if (options.length > 1) {
-        const filtered = options.filter(v => !(v.x === revX && v.y === revY));
-        if (filtered.length) candidates = filtered;
+function tileKey(r, c) {
+  return `${r},${c}`;
+}
+
+function entityToTile(entity) {
+  const c = Math.floor((entity.x + entity.width / 2) / tileSize);
+  const r = Math.floor((entity.y + entity.height / 2) / tileSize);
+  return { r, c };
+}
+
+function manhattan(a, b) {
+  return Math.abs(a.r - b.r) + Math.abs(a.c - b.c);
+}
+
+function reconstructPath(cameFrom, goalKey) {
+  const out = [];
+  let cur = goalKey;
+  while (cur) {
+    const [r, c] = cur.split(",").map(Number);
+    out.push({ r, c });
+    cur = cameFrom.get(cur);
+  }
+  out.reverse();
+  return out;
+}
+
+// A* pathfinding on the tile grid (4-neighbor)
+function aStar(start, goal) {
+  const startK = tileKey(start.r, start.c);
+  const goalK = tileKey(goal.r, goal.c);
+
+  if (startK === goalK) return [start];
+
+  const open = [startK];
+  const openSet = new Set([startK]);
+
+  const cameFrom = new Map(); // key -> previousKey
+  const gScore = new Map([[startK, 0]]);
+  const fScore = new Map([[startK, manhattan(start, goal)]]);
+
+  const parseKey = (k) => {
+    const [r, c] = k.split(",").map(Number);
+    return { r, c };
+  };
+
+  while (open.length) {
+    // pick node with lowest fScore (small grid => linear scan is fine)
+    let bestIdx = 0;
+    let bestF = fScore.get(open[0]) ?? Infinity;
+    for (let i = 1; i < open.length; i++) {
+      const f = fScore.get(open[i]) ?? Infinity;
+      if (f < bestF) {
+        bestF = f;
+        bestIdx = i;
       }
+    }
 
-      const pick = candidates[Math.floor(Math.random() * candidates.length)];
-      trySetVelocity(g, pick.x, pick.y);
+    const currentK = open.splice(bestIdx, 1)[0];
+    openSet.delete(currentK);
+
+    if (currentK === goalK) {
+      return reconstructPath(cameFrom, goalK);
+    }
+
+    const cur = parseKey(currentK);
+    const curG = gScore.get(currentK) ?? Infinity;
+
+    const neighbors = [
+      { r: cur.r + 1, c: cur.c },
+      { r: cur.r - 1, c: cur.c },
+      { r: cur.r, c: cur.c + 1 },
+      { r: cur.r, c: cur.c - 1 }
+    ];
+
+    for (const nb of neighbors) {
+      if (!isWalkable(nb.r, nb.c)) continue;
+
+      const nbK = tileKey(nb.r, nb.c);
+      const tentativeG = curG + 1;
+
+      if (tentativeG < (gScore.get(nbK) ?? Infinity)) {
+        cameFrom.set(nbK, currentK);
+        gScore.set(nbK, tentativeG);
+        fScore.set(nbK, tentativeG + manhattan(nb, goal));
+
+        if (!openSet.has(nbK)) {
+          open.push(nbK);
+          openSet.add(nbK);
+        }
+      }
     }
   }
 
+  return null; // no path
+}
+
+// ======= ghost AI (A* chase) =======
+function moveGhost(g) {
+  // Only decide a new direction when aligned to the tile grid
+  if (g.x % tileSize === 0 && g.y % tileSize === 0) {
+    let usedAStar = false;
+
+    if (pacman) {
+      const start = entityToTile(g);
+      const goal = entityToTile(pacman);
+
+      const path = aStar(start, goal);
+
+      // path[0] is current tile; path[1] is the next tile to step into
+      if (path && path.length >= 2) {
+        const next = path[1];
+        const dx = next.c - start.c; // -1,0,1
+        const dy = next.r - start.r; // -1,0,1
+
+        trySetVelocity(g, dx * speed, dy * speed);
+        usedAStar = true;
+      }
+    }
+
+    // fallback to your old random-ish move if no path
+    if (!usedAStar) {
+      const options = getValidVelocities(g);
+
+      if (options.length) {
+        const revX = -g.velocityX;
+        const revY = -g.velocityY;
+
+        let candidates = options;
+        if (options.length > 1) {
+          const filtered = options.filter(v => !(v.x === revX && v.y === revY));
+          if (filtered.length) candidates = filtered;
+        }
+
+        const pick = candidates[Math.floor(Math.random() * candidates.length)];
+        trySetVelocity(g, pick.x, pick.y);
+      }
+    }
+  }
+
+  // collision guard
   if (wouldHitWall(g, g.velocityX, g.velocityY)) {
     g.velocityX = 0;
     g.velocityY = 0;
     return;
   }
 
+  // move
   g.x += g.velocityX;
   g.y += g.velocityY;
 }
 
+// ======= movement helpers =======
 function getValidVelocities(entity) {
   const dirs = [
     { x: speed, y: 0 },
@@ -211,6 +353,7 @@ function getValidVelocities(entity) {
 }
 
 function trySetVelocity(entity, vx, vy) {
+  // snap-to-grid for clean turns (same logic you had)
   if (vx === 0) {
     const targetX = Math.round(entity.x / tileSize) * tileSize;
     if (Math.abs(entity.x - targetX) <= speed) entity.x = targetX;
@@ -251,7 +394,8 @@ function rectsOverlap(a, b) {
   );
 }
 
-function draw(){
+// ======= drawing =======
+function draw() {
   context.fillStyle = "rgb(123, 112, 112)";
   context.fillRect(0, 0, boardWidth, boardHeight);
 
@@ -271,8 +415,9 @@ function draw(){
   }
 }
 
-class Block{
-  constructor(image, x, y, width, height){
+// ======= Block class =======
+class Block {
+  constructor(image, x, y, width, height) {
     this.image = image;
     this.x = x;
     this.y = y;
@@ -282,27 +427,27 @@ class Block{
     this.startX = x;
     this.startY = y;
 
-    this.direction = 'R';
+    this.direction = "R";
     this.velocityX = 0;
     this.velocityY = 0;
   }
 
-  updateDirection(){
+  updateDirection() {
     this.direction = this.direction;
     this.updateVelocity();
   }
 
-  updateVelocity(){
-    if(this.direction == 'U'){
+  updateVelocity() {
+    if (this.direction == "U") {
       this.velocityX = 0;
       this.velocityY = -speed;
-    }else if(this.direction == 'D'){
+    } else if (this.direction == "D") {
       this.velocityX = 0;
       this.velocityY = speed;
-    }else if(this.direction == 'L'){
+    } else if (this.direction == "L") {
       this.velocityX = -speed;
       this.velocityY = 0;
-    }else if(this.direction == 'R'){
+    } else if (this.direction == "R") {
       this.velocityX = speed;
       this.velocityY = 0;
     }
