@@ -14,19 +14,24 @@ function loadImage(src) {
 }
 
 // ======= map =======
+// Legend:
+// X = wall
+// P = player
+// G = ghost (A*)
+// B = ghost (BFS)
 const tileMap = [
   "XXXXXXXXXXXXXXXXXXX",
   "X        X        X",
   "X XX XXX X XXX XX X",
   "X                 X",
   "X XX X XXXXX X XX X",
-  "X    X       X    X",
+  "X    X   G    X    X",
   "XXXX XXXX XXXX XXXX",
   "OOOX X       X XOOO",
   "XXXX X XXrXX X XXXX",
   "X        G        X",
   "XXXX X XXXXX X XXXX",
-  "XOO             OOX",
+  "XOO      B      OOX",
   "XXXX X XXXXX X XXXX",
   "X        X        X",
   "X XX XXX X XXX XX X",
@@ -122,6 +127,13 @@ function loadMap(humanImg, ghostImg, wallImg) {
         const g = new Block(ghostImg, x, y, tileSize, tileSize);
         g.velocityX = 0;
         g.velocityY = 0;
+        g.ai = "astar";
+        ghosts.add(g);
+      } else if (ch === "B") {
+        const g = new Block(ghostImg, x, y, tileSize, tileSize);
+        g.velocityX = 0;
+        g.velocityY = 0;
+        g.ai = "bfs";
         ghosts.add(g);
       } else if (ch === "P") {
         pacman = new Block(humanImg, x, y, tileSize, tileSize);
@@ -131,7 +143,7 @@ function loadMap(humanImg, ghostImg, wallImg) {
     }
   }
 
-  // optional: give ghosts an initial direction (A* will take over at first tile)
+  // give ghosts an initial direction (they'll re-decide at next tile)
   ghosts.forEach(g => {
     const opts = getValidVelocities(g);
     if (opts.length) {
@@ -178,7 +190,7 @@ function update() {
   if (!gameOver) setTimeout(update, 1000 / 20);
 }
 
-// ======= A* helpers (tile-based) =======
+// ======= tile helpers (for pathfinding) =======
 function tileAt(r, c) {
   const row = tileMap[r];
   if (!row) return "X";
@@ -187,6 +199,7 @@ function tileAt(r, c) {
 }
 
 function isWalkable(r, c) {
+  // everything except X is walkable
   return tileAt(r, c) !== "X";
 }
 
@@ -216,7 +229,7 @@ function reconstructPath(cameFrom, goalKey) {
   return out;
 }
 
-// A* pathfinding on the tile grid (4-neighbor)
+// ======= A* (4-neighbor) =======
 function aStar(start, goal) {
   const startK = tileKey(start.r, start.c);
   const goalK = tileKey(goal.r, goal.c);
@@ -236,7 +249,7 @@ function aStar(start, goal) {
   };
 
   while (open.length) {
-    // pick node with lowest fScore (small grid => linear scan is fine)
+    // pick node with lowest fScore (linear scan ok for small grid)
     let bestIdx = 0;
     let bestF = fScore.get(open[0]) ?? Infinity;
     for (let i = 1; i < open.length; i++) {
@@ -283,34 +296,74 @@ function aStar(start, goal) {
     }
   }
 
-  return null; // no path
+  return null;
 }
 
-// ======= ghost AI (A* chase) =======
+// ======= BFS (4-neighbor shortest path) =======
+function bfs(start, goal) {
+  const startK = tileKey(start.r, start.c);
+  const goalK = tileKey(goal.r, goal.c);
+  if (startK === goalK) return [start];
+
+  const queue = [start];
+  let qi = 0;
+
+  const visited = new Set([startK]);
+  const cameFrom = new Map(); // key -> previousKey
+
+  while (qi < queue.length) {
+    const cur = queue[qi++];
+    const curK = tileKey(cur.r, cur.c);
+
+    if (curK === goalK) {
+      return reconstructPath(cameFrom, goalK);
+    }
+
+    const neighbors = [
+      { r: cur.r + 1, c: cur.c },
+      { r: cur.r - 1, c: cur.c },
+      { r: cur.r, c: cur.c + 1 },
+      { r: cur.r, c: cur.c - 1 }
+    ];
+
+    for (const nb of neighbors) {
+      if (!isWalkable(nb.r, nb.c)) continue;
+
+      const nbK = tileKey(nb.r, nb.c);
+      if (visited.has(nbK)) continue;
+
+      visited.add(nbK);
+      cameFrom.set(nbK, curK);
+      queue.push(nb);
+    }
+  }
+
+  return null;
+}
+
+// ======= ghost movement (A* or BFS) =======
 function moveGhost(g) {
-  // Only decide a new direction when aligned to the tile grid
+  // decide only on tile centers
   if (g.x % tileSize === 0 && g.y % tileSize === 0) {
-    let usedAStar = false;
+    let usedPathing = false;
 
     if (pacman) {
       const start = entityToTile(g);
       const goal = entityToTile(pacman);
 
-      const path = aStar(start, goal);
+      const path = (g.ai === "bfs") ? bfs(start, goal) : aStar(start, goal);
 
-      // path[0] is current tile; path[1] is the next tile to step into
       if (path && path.length >= 2) {
         const next = path[1];
-        const dx = next.c - start.c; // -1,0,1
-        const dy = next.r - start.r; // -1,0,1
-
+        const dx = next.c - start.c;
+        const dy = next.r - start.r;
         trySetVelocity(g, dx * speed, dy * speed);
-        usedAStar = true;
+        usedPathing = true;
       }
     }
 
-    // fallback to your old random-ish move if no path
-    if (!usedAStar) {
+    // fallback random movement
+    if (!usedPathing) {
       const options = getValidVelocities(g);
 
       if (options.length) {
@@ -329,14 +382,12 @@ function moveGhost(g) {
     }
   }
 
-  // collision guard
   if (wouldHitWall(g, g.velocityX, g.velocityY)) {
     g.velocityX = 0;
     g.velocityY = 0;
     return;
   }
 
-  // move
   g.x += g.velocityX;
   g.y += g.velocityY;
 }
@@ -353,7 +404,7 @@ function getValidVelocities(entity) {
 }
 
 function trySetVelocity(entity, vx, vy) {
-  // snap-to-grid for clean turns (same logic you had)
+  // snap-to-grid for clean turns
   if (vx === 0) {
     const targetX = Math.round(entity.x / tileSize) * tileSize;
     if (Math.abs(entity.x - targetX) <= speed) entity.x = targetX;
@@ -430,6 +481,9 @@ class Block {
     this.direction = "R";
     this.velocityX = 0;
     this.velocityY = 0;
+
+    // "astar" or "bfs" (set during map load for ghosts)
+    this.ai = undefined;
   }
 
   updateDirection() {
