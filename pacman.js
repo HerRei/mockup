@@ -1,27 +1,61 @@
-// ===== Canvas / Board =====
+// main canvas setup
 let board;
-let context;
+let ctx; // using ctx instead of context is more common
 
 const tileSize = 32;
-const speed = 4; // pixels per frame
-let gameOver = false;
+const speed = 4;
+let isGameOver = false;
 
-// ===== Images =====
-function loadImage(src) {
+// The main entity class for pacman/ghosts/walls
+class Block {
+  constructor(image, x, y, width, height) {
+    this.image = image;
+    this.x = x;
+    this.y = y;
+    this.width = width;
+    this.height = height;
+
+    this.startX = x;
+    this.startY = y;
+
+    this.direction = "R";
+    this.velocityX = 0;
+    this.velocityY = 0;
+
+    // only used by ghosts
+    this.ai = undefined;
+    this.pheromone = undefined; 
+  }
+
+  updateVelocity() {
+    if (this.direction === "U") {
+      this.velocityX = 0;
+      this.velocityY = -speed;
+    } else if (this.direction === "D") {
+      this.velocityX = 0;
+      this.velocityY = speed;
+    } else if (this.direction === "L") {
+      this.velocityX = -speed;
+      this.velocityY = 0;
+    } else if (this.direction === "R") {
+      this.velocityX = speed;
+      this.velocityY = 0;
+    }
+  }
+}
+
+// helper to load images without callback hell
+const loadImage = (src) => {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => resolve(img);
     img.onerror = () => reject(new Error("Failed to load: " + src));
     img.src = src;
   });
-}
+};
 
-// ===== Map =====
-// X = wall
-// P = player
-// G = ghost (A*)
-// B = ghost (BFS)
-// C = ghost (ACO)
+// X = wall, P = player
+// G = A* ghost, B = BFS ghost, C = ACO ghost
 const tileMap = [
   "XXXXXXXXXXXXXXXXXXX",
   "X        X        X",
@@ -46,99 +80,90 @@ const tileMap = [
   "XXXXXXXXXXXXXXXXXXX"
 ];
 
-const rowCount = tileMap.length;
-const columnCount = Math.max(...tileMap.map(r => r.length));
-const boardWidth = tileSize * columnCount;
-const boardHeight = tileSize * rowCount;
+const rows = tileMap.length;
+const cols = Math.max(...tileMap.map(r => r.length));
+const boardWidth = tileSize * cols;
+const boardHeight = tileSize * rows;
 
-// ===== Entities =====
 const walls = new Set();
 const ghosts = new Set();
 let pacman = null;
 
-// ===== Input =====
+// input handling
 const keys = {
-  ArrowUp: { pressed: false },
-  ArrowDown: { pressed: false },
-  ArrowLeft: { pressed: false },
-  ArrowRight: { pressed: false }
+  ArrowUp: false,
+  ArrowDown: false,
+  ArrowLeft: false,
+  ArrowRight: false
 };
 let lastKey = "";
 
-addEventListener(
-  "keydown",
-  (e) => {
-    if (e.key in keys) {
-      e.preventDefault();
-      keys[e.key].pressed = true;
-      lastKey = e.key;
-    }
-    if (gameOver && e.key === "Enter") location.reload();
-  },
-  { passive: false }
-);
+window.addEventListener("keydown", (e) => {
+  if (keys[e.key] !== undefined) {
+    e.preventDefault();
+    keys[e.key] = true;
+    lastKey = e.key;
+  }
+  if (isGameOver && e.key === "Enter") location.reload();
+}, { passive: false });
 
-addEventListener("keyup", (e) => {
-  if (e.key in keys) keys[e.key].pressed = false;
+window.addEventListener("keyup", (e) => {
+  if (keys[e.key] !== undefined) keys[e.key] = false;
 });
 
-// ===== Init =====
-window.onload = async function () {
+window.onload = async () => {
   board = document.getElementById("board");
   board.width = boardWidth;
   board.height = boardHeight;
 
-  context = board.getContext("2d");
-  context.imageSmoothingEnabled = false;
+  ctx = board.getContext("2d");
+  ctx.imageSmoothingEnabled = false; // keep it crispy
 
-  let humanImg, ghostImg, wallImg;
   try {
-    [humanImg, ghostImg, wallImg] = await Promise.all([
+    const [playerImg, ghostPic, wallPic] = await Promise.all([
       loadImage("standing-up-man-.png"),
       loadImage("ghost.png"),
       loadImage("wall.png")
     ]);
+    
+    buildMap(playerImg, ghostPic, wallPic);
+    // console.log("Loaded ghosts:", ghosts.size); // debug crumb
+    
+    gameLoop();
   } catch (err) {
-    console.error(err);
-    return;
+    console.error("Error loading game assets", err);
   }
-
-  loadMap(humanImg, ghostImg, wallImg);
-
-  // quick sanity check:
-  // console.log("ghosts:", ghosts.size, [...ghosts].map(g => g.ai));
-
-  update();
 };
 
-// ===== Map Loader =====
-function loadMap(humanImg, ghostImg, wallImg) {
+function buildMap(playerImg, ghostImg, wallImg) {
   walls.clear();
   ghosts.clear();
   pacman = null;
 
-  for (let r = 0; r < rowCount; r++) {
-    for (let c = 0; c < columnCount; c++) {
-      const ch = tileMap[r][c] ?? " ";
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const char = tileMap[r][c] || " ";
       const x = c * tileSize;
       const y = r * tileSize;
 
-      if (ch === "X") {
+      if (char === "X") {
         walls.add(new Block(wallImg, x, y, tileSize, tileSize));
-      } else if (ch === "P") {
-        pacman = new Block(humanImg, x, y, tileSize, tileSize);
-      } else if (ch === "G" || ch === "B" || ch === "C") {
+      } else if (char === "P") {
+        pacman = new Block(playerImg, x, y, tileSize, tileSize);
+      } else if (["G", "B", "C"].includes(char)) {
         const g = new Block(ghostImg, x, y, tileSize, tileSize);
-        g.ai = ch === "G" ? "astar" : ch === "B" ? "bfs" : "aco";
-        g.pheromone = new Map(); // used by ACO ghost, harmless for others
+        // map chars to ai types
+        g.ai = char === "G" ? "astar" : char === "B" ? "bfs" : "aco";
+        if (g.ai === "aco") g.pheromone = new Map(); 
         ghosts.add(g);
       }
     }
   }
 
+  // give ghosts a random initial nudge
   ghosts.forEach(g => {
-    const opts = getValidVelocities(g);
-    if (opts.length) {
+    const opts = getValidMoves(g);
+    if (opts.length > 0) {
       const pick = opts[Math.floor(Math.random() * opts.length)];
       g.velocityX = pick.x;
       g.velocityY = pick.y;
@@ -146,32 +171,32 @@ function loadMap(humanImg, ghostImg, wallImg) {
   });
 }
 
-// ===== Game Loop =====
-function update() {
-  if (!gameOver) {
+function gameLoop() {
+  if (!isGameOver) {
     updatePlayer();
-    updateGhosts();
+    
+    ghosts.forEach(g => {
+      moveGhost(g);
+      if (pacman && checkCollision(pacman, g)) isGameOver = true;
+    });
   }
 
   draw();
 
-  if (!gameOver) setTimeout(update, 1000 / 20);
+  if (!isGameOver) {
+    setTimeout(gameLoop, 1000 / 20); // roughly 20fps
+  }
 }
 
 function updatePlayer() {
   if (!pacman) return;
 
-  if (keys.ArrowUp.pressed && lastKey === "ArrowUp") {
-    trySetVelocity(pacman, 0, -speed);
-  } else if (keys.ArrowDown.pressed && lastKey === "ArrowDown") {
-    trySetVelocity(pacman, 0, speed);
-  } else if (keys.ArrowLeft.pressed && lastKey === "ArrowLeft") {
-    trySetVelocity(pacman, -speed, 0);
-  } else if (keys.ArrowRight.pressed && lastKey === "ArrowRight") {
-    trySetVelocity(pacman, speed, 0);
-  }
+  if (keys.ArrowUp && lastKey === "ArrowUp") tryMove(pacman, 0, -speed);
+  else if (keys.ArrowDown && lastKey === "ArrowDown") tryMove(pacman, 0, speed);
+  else if (keys.ArrowLeft && lastKey === "ArrowLeft") tryMove(pacman, -speed, 0);
+  else if (keys.ArrowRight && lastKey === "ArrowRight") tryMove(pacman, speed, 0);
 
-  if (wouldHitWall(pacman, pacman.velocityX, pacman.velocityY)) {
+  if (hitsWall(pacman, pacman.velocityX, pacman.velocityY)) {
     pacman.velocityX = 0;
     pacman.velocityY = 0;
   }
@@ -180,25 +205,17 @@ function updatePlayer() {
   pacman.y += pacman.velocityY;
 }
 
-function updateGhosts() {
-  ghosts.forEach(g => {
-    moveGhost(g);
-    if (pacman && rectsOverlap(pacman, g)) gameOver = true;
-  });
-}
-
-// ===== Movement / Collision =====
-function getValidVelocities(entity) {
+function getValidMoves(entity) {
   const dirs = [
     { x: speed, y: 0 },
     { x: -speed, y: 0 },
     { x: 0, y: speed },
     { x: 0, y: -speed }
   ];
-  return dirs.filter(v => !wouldHitWall(entity, v.x, v.y));
+  return dirs.filter(v => !hitsWall(entity, v.x, v.y));
 }
 
-function trySetVelocity(entity, vx, vy) {
+function tryMove(entity, vx, vy) {
   // snap-to-grid like the tutorial
   if (vx === 0) {
     const targetX = Math.round(entity.x / tileSize) * tileSize;
@@ -210,28 +227,28 @@ function trySetVelocity(entity, vx, vy) {
     else return;
   }
 
-  if (!wouldHitWall(entity, vx, vy)) {
+  if (!hitsWall(entity, vx, vy)) {
     entity.velocityX = vx;
     entity.velocityY = vy;
   }
 }
 
-function wouldHitWall(entity, vx, vy) {
-  const nx = entity.x + vx;
-  const ny = entity.y + vy;
+function hitsWall(ent, vx, vy) {
+  const nx = ent.x + vx;
+  const ny = ent.y + vy;
 
   for (const w of walls) {
     if (
       nx < w.x + w.width &&
-      nx + entity.width > w.x &&
+      nx + ent.width > w.x &&
       ny < w.y + w.height &&
-      ny + entity.height > w.y
+      ny + ent.height > w.y
     ) return true;
   }
   return false;
 }
 
-function rectsOverlap(a, b) {
+function checkCollision(a, b) {
   return (
     a.x < b.x + b.width &&
     a.x + a.width > b.x &&
@@ -240,24 +257,22 @@ function rectsOverlap(a, b) {
   );
 }
 
-// ===== Tile helpers for pathfinding =====
-function tileAt(r, c) {
-  const row = tileMap[r];
-  if (!row) return "X";
-  return row[c] ?? "X";
+// grid helpers
+function getTileAt(r, c) {
+  return tileMap[r]?.[c] || "X";
 }
 
 function isWalkable(r, c) {
-  return tileAt(r, c) !== "X";
+  return getTileAt(r, c) !== "X";
 }
 
-function tileKey(r, c) {
-  return `${r},${c}`;
+function getTileKey(r, c) {
+  return `${r},${c}`; // cache key for maps
 }
 
-function entityToTile(entity) {
-  const c = Math.floor((entity.x + entity.width / 2) / tileSize);
-  const r = Math.floor((entity.y + entity.height / 2) / tileSize);
+function getEntityTile(ent) {
+  const c = Math.floor((ent.x + ent.width / 2) / tileSize);
+  const r = Math.floor((ent.y + ent.height / 2) / tileSize);
   return { r, c };
 }
 
@@ -265,7 +280,7 @@ function manhattan(a, b) {
   return Math.abs(a.r - b.r) + Math.abs(a.c - b.c);
 }
 
-function neighborsOf(t) {
+function getNeighbors(t) {
   const out = [
     { r: t.r + 1, c: t.c },
     { r: t.r - 1, c: t.c },
@@ -275,135 +290,126 @@ function neighborsOf(t) {
   return out.filter(n => isWalkable(n.r, n.c));
 }
 
-function reconstructPath(cameFrom, goalK) {
+function buildPath(cameFrom, goalKey) {
   const path = [];
-  let cur = goalK;
+  let current = goalKey;
 
-  while (cur) {
-    const [r, c] = cur.split(",").map(Number);
+  while (current) {
+    const [r, c] = current.split(",").map(Number);
     path.push({ r, c });
-    cur = cameFrom.get(cur);
+    current = cameFrom.get(current);
   }
 
-  path.reverse();
-  return path;
+  return path.reverse();
 }
 
-// ===== A* =====
-function aStar(start, goal) {
-  const startK = tileKey(start.r, start.c);
-  const goalK = tileKey(goal.r, goal.c);
-  if (startK === goalK) return [start];
+// A* pathfinding
+function findAStar(start, goal) {
+  const startKey = getTileKey(start.r, start.c);
+  const goalKey = getTileKey(goal.r, goal.c);
+  
+  if (startKey === goalKey) return [start];
 
-  const open = [startK];
-  const openSet = new Set([startK]);
+  const openList = [startKey];
+  const openSet = new Set([startKey]);
 
   const cameFrom = new Map();
-  const gScore = new Map([[startK, 0]]);
-  const fScore = new Map([[startK, manhattan(start, goal)]]);
+  const gScore = new Map([[startKey, 0]]);
+  const fScore = new Map([[startKey, manhattan(start, goal)]]);
 
-  function parseKey(k) {
-    const [r, c] = k.split(",").map(Number);
-    return { r, c };
-  }
-
-  while (open.length) {
+  while (openList.length > 0) {
     let bestIdx = 0;
-    let bestF = fScore.get(open[0]) ?? Infinity;
+    let bestF = fScore.get(openList[0]) || Infinity;
 
-    for (let i = 1; i < open.length; i++) {
-      const f = fScore.get(open[i]) ?? Infinity;
+    for (let i = 1; i < openList.length; i++) {
+      const f = fScore.get(openList[i]) || Infinity;
       if (f < bestF) {
         bestF = f;
         bestIdx = i;
       }
     }
 
-    const currentK = open.splice(bestIdx, 1)[0];
-    openSet.delete(currentK);
+    const currentKey = openList.splice(bestIdx, 1)[0];
+    openSet.delete(currentKey);
 
-    if (currentK === goalK) return reconstructPath(cameFrom, goalK);
+    if (currentKey === goalKey) return buildPath(cameFrom, goalKey);
 
-    const cur = parseKey(currentK);
-    const curG = gScore.get(currentK) ?? Infinity;
+    const [r, c] = currentKey.split(",").map(Number);
+    const curG = gScore.get(currentKey) || Infinity;
 
-    for (const nb of neighborsOf(cur)) {
-      const nbK = tileKey(nb.r, nb.c);
+    for (const nb of getNeighbors({r, c})) {
+      const nbKey = getTileKey(nb.r, nb.c);
       const tentative = curG + 1;
 
-      if (tentative < (gScore.get(nbK) ?? Infinity)) {
-        cameFrom.set(nbK, currentK);
-        gScore.set(nbK, tentative);
-        fScore.set(nbK, tentative + manhattan(nb, goal));
+      if (tentative < (gScore.get(nbKey) || Infinity)) {
+        cameFrom.set(nbKey, currentKey);
+        gScore.set(nbKey, tentative);
+        fScore.set(nbKey, tentative + manhattan(nb, goal));
 
-        if (!openSet.has(nbK)) {
-          open.push(nbK);
-          openSet.add(nbK);
+        if (!openSet.has(nbKey)) {
+          openList.push(nbKey);
+          openSet.add(nbKey);
         }
       }
     }
   }
-
   return null;
 }
 
-// ===== BFS =====
-function bfs(start, goal) {
-  const startK = tileKey(start.r, start.c);
-  const goalK = tileKey(goal.r, goal.c);
-  if (startK === goalK) return [start];
+// Breadth First Search 
+function findBfs(start, goal) {
+  const startKey = getTileKey(start.r, start.c);
+  const goalKey = getTileKey(goal.r, goal.c);
+  if (startKey === goalKey) return [start];
 
-  const q = [start];
-  let qi = 0;
+  const queue = [start];
+  let qIdx = 0; // faster than shift()
 
-  const visited = new Set([startK]);
+  const visited = new Set([startKey]);
   const cameFrom = new Map();
 
-  while (qi < q.length) {
-    const cur = q[qi++];
-    const curK = tileKey(cur.r, cur.c);
+  while (qIdx < queue.length) {
+    const cur = queue[qIdx++];
+    const curKey = getTileKey(cur.r, cur.c);
 
-    if (curK === goalK) return reconstructPath(cameFrom, goalK);
+    if (curKey === goalKey) return buildPath(cameFrom, goalKey);
 
-    for (const nb of neighborsOf(cur)) {
-      const nbK = tileKey(nb.r, nb.c);
-      if (visited.has(nbK)) continue;
+    for (const nb of getNeighbors(cur)) {
+      const nbKey = getTileKey(nb.r, nb.c);
+      if (visited.has(nbKey)) continue;
 
-      visited.add(nbK);
-      cameFrom.set(nbK, curK);
-      q.push(nb);
+      visited.add(nbKey);
+      cameFrom.set(nbKey, curKey);
+      queue.push(nb);
     }
   }
-
   return null;
 }
 
-// ===== ACO (heuristic / lightweight) =====
-// Not a full academic ACO, but "ant-like" exploration + pheromone memory.
-// Falls back to BFS if it doesn't find a goal path quickly.
-function acoFindPath(ghost, start, goal) {
-  const pher = ghost.pheromone ?? (ghost.pheromone = new Map());
+// experimenting with Ant Colony Optimization here. 
+// Note: not a true academic implementation, but "ant-like" exploration + pheromone memory.
+// Falls back to BFS if it can't find a path quickly.
+function findAco(ghost, start, goal) {
+  const pher = ghost.pheromone || (ghost.pheromone = new Map());
 
-  const alpha = 1.0;   // pheromone weight
-  const beta = 2.8;    // heuristic (distance) weight
-  const rho = 0.22;    // evaporation
-  const Q = 35;        // deposit strength
+  // tweak these constants later if needed
+  const alpha = 1.0;   
+  const beta = 2.8;    
+  const rho = 0.22;    
+  const Q = 35;        
 
-  const ants = 16;
-  const iterations = 6;
-  const maxSteps = 80;
+  const startKey = getTileKey(start.r, start.c);
+  const goalKey = getTileKey(goal.r, goal.c);
+  
+  if (startKey === goalKey) return [start];
 
-  const startK = tileKey(start.r, start.c);
-  const goalK = tileKey(goal.r, goal.c);
-  if (startK === goalK) return [start];
-
-  const edgeKey = (aK, bK) => `${aK}|${bK}`;
-  const tau = (aK, bK) => pher.get(edgeKey(aK, bK)) ?? 1.0;
+  const edgeKey = (a, b) => `${a}|${b}`;
+  const tau = (a, b) => pher.get(edgeKey(a, b)) || 1.0;
 
   function evaporate() {
     for (const [k, v] of pher.entries()) {
       const nv = v * (1 - rho);
-      if (nv < 0.01) pher.delete(k);
+      if (nv < 0.01) pher.delete(k); // cleanup
       else pher.set(k, nv);
     }
   }
@@ -414,30 +420,27 @@ function acoFindPath(ghost, start, goal) {
     const add = Q / cost;
 
     for (let i = 0; i < path.length - 1; i++) {
-      const a = path[i];
-      const b = path[i + 1];
-      const aK = tileKey(a.r, a.c);
-      const bK = tileKey(b.r, b.c);
-      const k = edgeKey(aK, bK);
-      pher.set(k, (pher.get(k) ?? 1.0) + add);
+      const aKey = getTileKey(path[i].r, path[i].c);
+      const bKey = getTileKey(path[i+1].r, path[i+1].c);
+      const key = edgeKey(aKey, bKey);
+      pher.set(key, (pher.get(key) || 1.0) + add);
     }
   }
 
-  function weightedNext(cur, goal, seen) {
-    const nbs = neighborsOf(cur);
+  function getWeightedNext(cur, tgt, seenSet) {
+    const nbs = getNeighbors(cur);
     if (!nbs.length) return null;
 
-    const curK2 = tileKey(cur.r, cur.c);
-
+    const curKey = getTileKey(cur.r, cur.c);
     let sum = 0;
     const items = [];
 
     for (const nb of nbs) {
-      const nbK = tileKey(nb.r, nb.c);
-      const eta = 1 / (manhattan(nb, goal) + 1);
+      const nbKey = getTileKey(nb.r, nb.c);
+      const eta = 1 / (manhattan(nb, tgt) + 1);
 
-      let w = Math.pow(tau(curK2, nbK), alpha) * Math.pow(eta, beta);
-      if (seen.has(nbK)) w *= 0.05; // avoid loops
+      let w = Math.pow(tau(curKey, nbKey), alpha) * Math.pow(eta, beta);
+      if (seenSet.has(nbKey)) w *= 0.05; // punish backtracking
 
       items.push({ nb, w });
       sum += w;
@@ -445,10 +448,10 @@ function acoFindPath(ghost, start, goal) {
 
     if (sum <= 0) return nbs[Math.floor(Math.random() * nbs.length)];
 
-    let r = Math.random() * sum;
-    for (const it of items) {
-      r -= it.w;
-      if (r <= 0) return it.nb;
+    let rand = Math.random() * sum;
+    for (const item of items) {
+      rand -= item.w;
+      if (rand <= 0) return item.nb;
     }
     return items[items.length - 1].nb;
   }
@@ -456,37 +459,36 @@ function acoFindPath(ghost, start, goal) {
   let best = null;
   let bestCost = Infinity;
 
-  for (let it = 0; it < iterations; it++) {
+  for (let it = 0; it < 6; it++) {
     let bestIter = null;
     let bestIterCost = Infinity;
 
-    for (let a = 0; a < ants; a++) {
+    for (let ant = 0; ant < 16; ant++) {
       let cur = start;
       const path = [cur];
-      const seen = new Set([startK]);
-
+      const seen = new Set([startKey]);
       let reached = false;
 
-      for (let step = 0; step < maxSteps; step++) {
-        const curK2 = tileKey(cur.r, cur.c);
-        if (curK2 === goalK) { reached = true; break; }
+      for (let step = 0; step < 80; step++) {
+        const curKey = getTileKey(cur.r, cur.c);
+        if (curKey === goalKey) { reached = true; break; }
 
-        const nxt = weightedNext(cur, goal, seen);
-        if (!nxt) break;
+        const next = getWeightedNext(cur, goal, seen);
+        if (!next) break;
 
-        cur = nxt;
-        const nk = tileKey(cur.r, cur.c);
+        cur = next;
+        const nk = getTileKey(cur.r, cur.c);
         path.push(cur);
         seen.add(nk);
 
-        if (nk === goalK) { reached = true; break; }
+        if (nk === goalKey) { reached = true; break; }
       }
 
       if (reached) {
         const cost = path.length - 1;
         if (cost < bestIterCost) {
           bestIterCost = cost;
-          bestIter = path.slice();
+          bestIter = [...path];
         }
       }
     }
@@ -503,129 +505,85 @@ function acoFindPath(ghost, start, goal) {
   return best;
 }
 
-// ===== Ghost movement dispatcher =====
-function moveGhost(g) {
-  // choose direction only when aligned to tile grid
-  if (g.x % tileSize === 0 && g.y % tileSize === 0) {
-    let didPick = false;
+// figure out where the ghost is going based on its type
+function moveGhost(ghost) {
+  // wait until we are aligned with the grid to pick a new direction
+  if (ghost.x % tileSize === 0 && ghost.y % tileSize === 0) {
+    let handled = false;
 
     if (pacman) {
-      const start = entityToTile(g);
-      const goal = entityToTile(pacman);
-
+      const start = getEntityTile(ghost);
+      const goal = getEntityTile(pacman);
       let path = null;
 
-      if (g.ai === "bfs") {
-        path = bfs(start, goal);
-      } else if (g.ai === "aco") {
-        path = acoFindPath(g, start, goal);
-        if (!path) path = bfs(start, goal);
+      if (ghost.ai === "bfs") {
+        path = findBfs(start, goal);
+      } else if (ghost.ai === "aco") {
+        path = findAco(ghost, start, goal) || findBfs(start, goal);
       } else {
-        path = aStar(start, goal);
+        path = findAStar(start, goal);
       }
 
-      if (path && path.length >= 2) {
+      if (path && path.length > 1) {
         const next = path[1];
         const dx = next.c - start.c;
         const dy = next.r - start.r;
 
-        trySetVelocity(g, dx * speed, dy * speed);
-        didPick = true;
+        tryMove(ghost, dx * speed, dy * speed);
+        handled = true;
       }
     }
 
-    // fallback (keeps the vibe from the tutorial)
-    if (!didPick) {
-      const options = getValidVelocities(g);
+    // random fallback from the tutorial
+    if (!handled) {
+      const options = getValidMoves(ghost);
 
-      if (options.length) {
-        const revX = -g.velocityX;
-        const revY = -g.velocityY;
+      if (options.length > 0) {
+        const revX = -ghost.velocityX;
+        const revY = -ghost.velocityY;
 
         let candidates = options;
+        // try not to reverse direction unless it's a dead end
         if (options.length > 1) {
           const filtered = options.filter(v => !(v.x === revX && v.y === revY));
           if (filtered.length) candidates = filtered;
         }
 
         const pick = candidates[Math.floor(Math.random() * candidates.length)];
-        trySetVelocity(g, pick.x, pick.y);
+        tryMove(ghost, pick.x, pick.y);
       }
     }
   }
 
-  if (wouldHitWall(g, g.velocityX, g.velocityY)) {
-    g.velocityX = 0;
-    g.velocityY = 0;
+  if (hitsWall(ghost, ghost.velocityX, ghost.velocityY)) {
+    ghost.velocityX = 0;
+    ghost.velocityY = 0;
     return;
   }
 
-  g.x += g.velocityX;
-  g.y += g.velocityY;
+  ghost.x += ghost.velocityX;
+  ghost.y += ghost.velocityY;
 }
 
-// ===== Draw =====
+// render loop
 function draw() {
-  context.fillStyle = "rgb(123, 112, 112)";
-  context.fillRect(0, 0, boardWidth, boardHeight);
+  ctx.fillStyle = "rgb(123, 112, 112)";
+  ctx.fillRect(0, 0, boardWidth, boardHeight);
 
-  walls.forEach(w => context.drawImage(w.image, w.x, w.y, w.width, w.height));
-  ghosts.forEach(g => context.drawImage(g.image, g.x, g.y, g.width, g.height));
-  if (pacman) context.drawImage(pacman.image, pacman.x, pacman.y, pacman.width, pacman.height);
+  walls.forEach(w => ctx.drawImage(w.image, w.x, w.y, w.width, w.height));
+  ghosts.forEach(g => ctx.drawImage(g.image, g.x, g.y, g.width, g.height));
+  if (pacman) ctx.drawImage(pacman.image, pacman.x, pacman.y, pacman.width, pacman.height);
 
-  if (gameOver) {
-    context.fillStyle = "rgba(0,0,0,0.6)";
-    context.fillRect(0, 0, boardWidth, boardHeight);
+  if (isGameOver) {
+    ctx.fillStyle = "rgba(0,0,0,0.6)";
+    ctx.fillRect(0, 0, boardWidth, boardHeight);
 
-    context.fillStyle = "white";
-    context.textAlign = "center";
-    context.font = "48px sans-serif";
-    context.fillText("GAME OVER", boardWidth / 2, boardHeight / 2);
+    ctx.fillStyle = "white";
+    ctx.textAlign = "center";
+    ctx.font = "48px sans-serif";
+    ctx.fillText("GAME OVER", boardWidth / 2, boardHeight / 2);
 
-    context.font = "20px sans-serif";
-    context.fillText("Press Enter to restart", boardWidth / 2, boardHeight / 2 + 40);
-  }
-}
-
-// ===== Block class (from the tutorial vibe) =====
-class Block {
-  constructor(image, x, y, width, height) {
-    this.image = image;
-    this.x = x;
-    this.y = y;
-    this.width = width;
-    this.height = height;
-
-    this.startX = x;
-    this.startY = y;
-
-    this.direction = "R";
-    this.velocityX = 0;
-    this.velocityY = 0;
-
-    // ghost-only
-    this.ai = undefined;
-    this.pheromone = undefined;
-  }
-
-  updateDirection() {
-    this.direction = this.direction;
-    this.updateVelocity();
-  }
-
-  updateVelocity() {
-    if (this.direction === "U") {
-      this.velocityX = 0;
-      this.velocityY = -speed;
-    } else if (this.direction === "D") {
-      this.velocityX = 0;
-      this.velocityY = speed;
-    } else if (this.direction === "L") {
-      this.velocityX = -speed;
-      this.velocityY = 0;
-    } else if (this.direction === "R") {
-      this.velocityX = speed;
-      this.velocityY = 0;
-    }
+    ctx.font = "20px sans-serif";
+    ctx.fillText("Press Enter to restart", boardWidth / 2, boardHeight / 2 + 40);
   }
 }
