@@ -2,7 +2,6 @@
  * @jest-environment jsdom
  */
 
-// We try to import the game functions
 const game = require('./pacman');
 
 describe('Essential Game Logic', () => {
