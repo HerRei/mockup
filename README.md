@@ -14,7 +14,7 @@ Also i used ai Autocomplete with continue and qwen 8b, but its really useless tb
 Different ghosts use different algorithms to navigate the grid:
 Red (G):Uses A (A-Star). It's the most aggressive and takes the shortest path.
 Pink (B): Uses BFS (Breadth-First Search). Similar to A but explores differently.
-Orange (C): Uses ACO (Ant Colony Optimization). This is experimental; it leaves "pheromones" on paths. It's a bit chaotic but works.
+Orange (C): Uses ACO. This is experimental; it leaves pheromones on paths. It's a bit chaotic but works.
 
 # How to Run
 No build step required for the game itself.
