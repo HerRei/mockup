@@ -1,6 +1,8 @@
 # JS Mockup-Gameversion for Testing
 A simple Game implementation using HTML5 Canvas and Vanilla JS.
 
+Here is the demo version: https://herrei.github.io/mockup/
+
 I built this as a mockup for cs108 at unibasel to get an Idea if the game idea of our team is playable. i mainly used these rescources:
 cs50web that i took and got familiar with js and css
 cs50Ai that i took and got the ideas for bfs a* for
